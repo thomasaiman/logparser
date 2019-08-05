@@ -30,12 +30,12 @@ class Node:
 
 
 class DrainCore:
-    def __init__(self, messages, depth=4, st=0.4, maxChild=100, rex=[]):
+    def __init__(self, messages, regexSubPair=[], depth=4, st=0.4, maxChild=100):
         """
         Attributes
         ----------
             messages : an iterable of strings
-            rex : regular expressions used in preprocessing (step1)
+            regexSubPair : list of (pattern, repl) regular expressions used in preprocessing (step1)
             depth : depth of all leaf nodes
             st : similarity threshold
             maxChild : max number of children of an internal node
@@ -48,7 +48,7 @@ class DrainCore:
         self.maxChild = maxChild
         self.logName = None
         self.df_log = None
-        self.rex = rex
+        self.regexSubPair = regexSubPair
 
     def hasNumbers(self, s):
         return any(char.isdigit() for char in s)
@@ -245,12 +245,12 @@ class DrainCore:
             #     os.makedirs(self.savePath)
             #
             # self.outputResult(logCluL)
-            
+            print(self.printTree(self.rootNode,0))
             print('Parsing done. [Time taken: {!s}]'.format(datetime.now() - start_time))
 
     def preprocess(self, line):
-        for currentRex in self.rex:
-            line = re.sub(currentRex, '<*>', line)
+        for (pattern, repl) in self.regexSubPair:
+            line = re.sub(pattern, repl, line)
         return line
 
 
