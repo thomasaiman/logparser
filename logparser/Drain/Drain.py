@@ -29,30 +29,26 @@ class Node:
         self.digitOrtoken = digitOrtoken
 
 
-class LogParser:
-    def __init__(self, log_format, indir='./', outdir='./result/', depth=4, st=0.4, 
-                 maxChild=100, rex=[], keep_para=True):
+class DrainCore:
+    def __init__(self, messages, depth=4, st=0.4, maxChild=100, rex=[]):
         """
         Attributes
         ----------
+            messages : an iterable of strings
             rex : regular expressions used in preprocessing (step1)
-            path : the input path stores the input log file name
             depth : depth of all leaf nodes
             st : similarity threshold
             maxChild : max number of children of an internal node
             logName : the name of the input file containing raw log messages
             savePath : the output path stores the file containing structured logs
         """
-        self.path = indir
+        self.messages = messages
         self.depth = depth - 2
         self.st = st
         self.maxChild = maxChild
         self.logName = None
-        self.savePath = outdir
         self.df_log = None
-        self.log_format = log_format
         self.rex = rex
-        self.keep_para = keep_para
 
     def hasNumbers(self, s):
         return any(char.isdigit() for char in s)
@@ -159,7 +155,6 @@ class LogParser:
 
         return retVal, numOfPar
 
-
     def fastMatch(self, logClustL, seq):
         retLogClust = None
 
@@ -194,37 +189,6 @@ class LogParser:
 
         return retVal
 
-    def outputResult(self, logClustL):
-        log_templates = [0] * self.df_log.shape[0]
-        log_templateids = [0] * self.df_log.shape[0]
-        df_events = []
-        for logClust in logClustL:
-            template_str = ' '.join(logClust.logTemplate)
-            occurrence = len(logClust.logIDL)
-            template_id = hashlib.md5(template_str.encode('utf-8')).hexdigest()[0:8]
-            for logID in logClust.logIDL:
-                logID -= 1
-                log_templates[logID] = template_str
-                log_templateids[logID] = template_id
-            df_events.append([template_id, template_str, occurrence])
-
-        df_event = pd.DataFrame(df_events, columns=['EventId', 'EventTemplate', 'Occurrences'])
-        self.df_log['EventId'] = log_templateids
-        self.df_log['EventTemplate'] = log_templates
-
-        if self.keep_para:
-            self.df_log["ParameterList"] = self.df_log.apply(self.get_parameter_list, axis=1) 
-        self.df_log.to_csv(os.path.join(self.savePath, self.logName + '_structured.csv'), index=False)
-
-
-        occ_dict = dict(self.df_log['EventTemplate'].value_counts())
-        df_event = pd.DataFrame()
-        df_event['EventTemplate'] = self.df_log['EventTemplate'].unique()
-        df_event['EventId'] = df_event['EventTemplate'].map(lambda x: hashlib.md5(x.encode('utf-8')).hexdigest()[0:8])
-        df_event['Occurrences'] = df_event['EventTemplate'].map(occ_dict)
-        df_event.to_csv(os.path.join(self.savePath, self.logName + '_templates.csv'), index=False, columns=["EventId", "EventTemplate", "Occurrences"])
-
-
     def printTree(self, node, dep):
         pStr = ''   
         for i in range(dep):
@@ -244,59 +208,79 @@ class LogParser:
         for child in node.childD:
             self.printTree(node.childD[child], dep+1)
 
+    def parse(self, msg, msgID):
+        logmessageL = self.preprocess(msg).strip().split()
+        # logmessageL = filter(lambda x: x != '', re.split('[\s=:,]', self.preprocess(line['Content'])))
+        matchCluster = self.treeSearch(self.rootNode, logmessageL)
 
-    def parse(self, logName):
-        print('Parsing file: ' + os.path.join(self.path, logName))
-        start_time = datetime.now()
-        self.logName = logName
-        rootNode = Node()
-        logCluL = []
+        # Match no existing log cluster
+        if matchCluster is None:
+            newCluster = Logcluster(logTemplate=logmessageL, logIDL=[msgID])
+            self.logCluL.append(newCluster)
+            self.addSeqToPrefixTree(self.rootNode, newCluster)
 
-        self.load_data()
+        # Add the new log message to the existing cluster
+        else:
+            newTemplate = self.getTemplate(logmessageL, matchCluster.logTemplate)
+            matchCluster.logIDL.append(msgID)
+            if ' '.join(newTemplate) != ' '.join(matchCluster.logTemplate):
+                matchCluster.logTemplate = newTemplate
 
-        count = 0
-        for idx, line in self.df_log.iterrows():
-            logID = line['LineId']
-            logmessageL = self.preprocess(line['Content']).strip().split()
-            # logmessageL = filter(lambda x: x != '', re.split('[\s=:,]', self.preprocess(line['Content'])))
-            matchCluster = self.treeSearch(rootNode, logmessageL)
-
-            #Match no existing log cluster
-            if matchCluster is None:
-                newCluster = Logcluster(logTemplate=logmessageL, logIDL=[logID])
-                logCluL.append(newCluster)
-                self.addSeqToPrefixTree(rootNode, newCluster)
-
-            #Add the new log message to the existing cluster
-            else:
-                newTemplate = self.getTemplate(logmessageL, matchCluster.logTemplate)
-                matchCluster.logIDL.append(logID)
-                if ' '.join(newTemplate) != ' '.join(matchCluster.logTemplate): 
-                    matchCluster.logTemplate = newTemplate
-
-            count += 1
-            if count % 1000 == 0 or count == len(self.df_log):
-                print('Processed {0:.1f}% of log lines.'.format(count * 100.0 / len(self.df_log)))
-
-
-        if not os.path.exists(self.savePath):
-            os.makedirs(self.savePath)
-
-        self.outputResult(logCluL)
-
-        print('Parsing done. [Time taken: {!s}]'.format(datetime.now() - start_time))
-
-    def load_data(self):
-        headers, regex = self.generate_logformat_regex(self.log_format)
-        self.df_log = self.log_to_dataframe(os.path.join(self.path, self.logName), regex, headers, self.log_format)
+    def parse_all(self, messages):
+            print('Parsing...')
+            start_time = datetime.now()
+            self.rootNode = Node()
+            self.logCluL = []
+    
+            count = 0
+            for line in self.messages:
+                msg, msgID = line[0], line[1]
+                self.parse(msg,msgID)
+                count += 1
+                if count % 1000 == 0:
+                    print('Processed {0:.1f} log lines.'.format(count))
+            print('Processed {0:.1f} log lines.'.format(count))
+    
+            # if not os.path.exists(self.savePath):
+            #     os.makedirs(self.savePath)
+            #
+            # self.outputResult(logCluL)
+            
+            print('Parsing done. [Time taken: {!s}]'.format(datetime.now() - start_time))
 
     def preprocess(self, line):
         for currentRex in self.rex:
             line = re.sub(currentRex, '<*>', line)
         return line
 
+
+class DrainIO:
+    def __init__(self, log_format, indir='./', outdir='./result/', depth=4, st=0.4,
+                 maxChild=100, rex=[], keep_para=True):
+        """
+        Attributes
+        ----------
+            rex : regular expressions used in preprocessing (step1)
+            path : the input path stores the input log file name
+            depth : depth of all leaf nodes
+            st : similarity threshold
+            maxChild : max number of children of an internal node
+            logName : the name of the input file containing raw log messages
+            savePath : the output path stores the file containing structured logs
+        """
+        self.path = indir
+        self.depth = depth - 2
+        self.st = st
+        self.maxChild = maxChild
+        self.logName = None
+        self.savePath = outdir
+        self.df_log = None
+        self.log_format = log_format
+        self.rex = rex
+        self.keep_para = keep_para
+        
     def log_to_dataframe(self, log_file, regex, headers, logformat):
-        """ Function to transform log file to dataframe 
+        """ Function to transform log file to dataframe
         """
         log_messages = []
         linecount = 0
@@ -313,8 +297,7 @@ class LogParser:
         logdf.insert(0, 'LineId', None)
         logdf['LineId'] = [i + 1 for i in range(linecount)]
         return logdf
-
-
+    
     def generate_logformat_regex(self, logformat):
         """ Function to generate regular expression to split log messages
         """
@@ -331,7 +314,7 @@ class LogParser:
                 headers.append(header)
         regex = re.compile('^' + regex + '$')
         return headers, regex
-
+    
     def get_parameter_list(self, row):
         template_regex = re.sub(r"<.{1,5}>", "<*>", row["EventTemplate"])
         if "<*>" not in template_regex: return []
@@ -342,3 +325,37 @@ class LogParser:
         parameter_list = parameter_list[0] if parameter_list else ()
         parameter_list = list(parameter_list) if isinstance(parameter_list, tuple) else [parameter_list]
         return parameter_list
+
+    def outputResult(self, logClustL):
+        log_templates = [0] * self.df_log.shape[0]
+        log_templateids = [0] * self.df_log.shape[0]
+        df_events = []
+        for logClust in logClustL:
+            template_str = ' '.join(logClust.logTemplate)
+            occurrence = len(logClust.logIDL)
+            template_id = hashlib.md5(template_str.encode('utf-8')).hexdigest()[0:8]
+            for logID in logClust.logIDL:
+                logID -= 1
+                log_templates[logID] = template_str
+                log_templateids[logID] = template_id
+            df_events.append([template_id, template_str, occurrence])
+
+        df_event = pd.DataFrame(df_events, columns=['EventId', 'EventTemplate', 'Occurrences'])
+        self.df_log['EventId'] = log_templateids
+        self.df_log['EventTemplate'] = log_templates
+
+        if self.keep_para:
+            self.df_log["ParameterList"] = self.df_log.apply(self.get_parameter_list, axis=1)
+        self.df_log.to_csv(os.path.join(self.savePath, self.logName + '_structured.csv'), index=False)
+
+
+        occ_dict = dict(self.df_log['EventTemplate'].value_counts())
+        df_event = pd.DataFrame()
+        df_event['EventTemplate'] = self.df_log['EventTemplate'].unique()
+        df_event['EventId'] = df_event['EventTemplate'].map(lambda x: hashlib.md5(x.encode('utf-8')).hexdigest()[0:8])
+        df_event['Occurrences'] = df_event['EventTemplate'].map(occ_dict)
+        df_event.to_csv(os.path.join(self.savePath, self.logName + '_templates.csv'), index=False, columns=["EventId", "EventTemplate", "Occurrences"])
+
+    def load_data(self):
+        headers, regex = self.generate_logformat_regex(self.log_format)
+        self.df_log = self.log_to_dataframe(os.path.join(self.path, self.logName), regex, headers, self.log_format)
